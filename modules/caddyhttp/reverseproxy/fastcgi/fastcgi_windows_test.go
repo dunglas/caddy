@@ -18,6 +18,7 @@ package fastcgi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -69,6 +70,48 @@ func TestBuildEnvWindowsSeparatorsCannotSelectAnotherScript(t *testing.T) {
 				"PATH_INFO must come from the normalized, cleaned path")
 			assert.NotContains(t, env["SCRIPT_FILENAME"], "admin.php",
 				"a pre-normalization path component must never become the executed script")
+		})
+	}
+}
+
+// Windows opens ADMIN~1.PHP as admin.php and upload.txt:x.php as a stream of
+// upload.txt, while path matchers compare the literal names, so the transport
+// rejects them like file_server does.
+func TestBuildEnvRejectsWindowsAliasesInScriptPath(t *testing.T) {
+	t.Parallel()
+
+	newRequest := func(target string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, target, nil)
+		ctx := context.WithValue(r.Context(), caddy.ReplacerCtxKey, caddy.NewReplacer())
+		ctx = context.WithValue(ctx, caddyhttp.VarsCtxKey, map[string]any{})
+		ctx = context.WithValue(ctx, caddyhttp.OriginalRequestCtxKey, *r)
+		return r.WithContext(ctx)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		target   string
+		rejected bool
+	}{
+		{"short name script", "/ADMIN~1.PHP", true},
+		{"short name directory", "/PRIVAT~1/index.php", true},
+		{"short name before path info", "/ADMIN~1.PHP/extra", true},
+		{"alternate data stream", "/upload.txt:x.php", true},
+		{"ordinary script", "/admin.php", false},
+		{"short name in path info only", "/index.php/ADMIN~1", false},
+		{"colon in path info only", "/index.php/a:b", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := Transport{Root: `C:\srv`, SplitPath: []string{".php"}}
+			_, err := tr.buildEnv(newRequest(tc.target))
+			if !tc.rejected {
+				require.NoError(t, err)
+				return
+			}
+
+			herr, ok := errors.AsType[caddyhttp.HandlerError](err)
+			require.True(t, ok, "expected a handler error, got %v", err)
+			assert.Equal(t, http.StatusBadRequest, herr.StatusCode)
 		})
 	}
 }

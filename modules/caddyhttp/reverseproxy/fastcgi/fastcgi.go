@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -178,6 +179,9 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 	env, err := t.buildEnv(r)
 	if err != nil {
+		if herr, ok := errors.AsType[caddyhttp.HandlerError](err); ok {
+			return nil, herr
+		}
 		return nil, fmt.Errorf("building environment: %v", err)
 	}
 
@@ -313,6 +317,12 @@ func (t Transport) buildEnv(r *http.Request) (envVars, error) {
 
 		// Strip PATH_INFO from SCRIPT_NAME
 		scriptName = strings.TrimSuffix(scriptName, pathInfo)
+	}
+
+	// Like file_server: path matchers can't see that Windows resolves 8.3 aliases
+	// (ADMIN~1.PHP is admin.php) and alternate data streams (upload.txt:x.php)
+	if runtime.GOOS == "windows" && (strings.Contains(scriptName, ":") || caddyhttp.HasWindowsShortName(scriptName)) {
+		return nil, caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("illegal script path"))
 	}
 
 	// Try to grab the path remainder from a file matcher
